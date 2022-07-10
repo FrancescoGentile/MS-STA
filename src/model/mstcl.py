@@ -13,24 +13,23 @@ class TemporalConvolution(nn.Module):
                  out_channels: int, 
                  kernel_size: int, 
                  dilation: int = 1,
-                 stride: int = 1) -> None:
+                 stride: int = 1,
+                 bias: bool = False) -> None:
         super().__init__()
         
         padding = (kernel_size + (kernel_size-1) * (dilation-1) - 1) // 2        
-        self.layer = nn.Sequential(
-            nn.Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size=(kernel_size, 1),
-                padding=(padding, 0),
-                dilation=(dilation, 1),
-                stride=(stride, 1)
-            ),
-            nn.InstanceNorm2d(out_channels)
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=(kernel_size, 1),
+            padding=(padding, 0),
+            dilation=(dilation, 1),
+            stride=(stride, 1), 
+            bias=bias
         )
         
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return self.layer(input)
+        return self.conv(input)
         
 
 class MultiScaleTemporalConvolutionLayer(nn.Module):
@@ -41,8 +40,9 @@ class MultiScaleTemporalConvolutionLayer(nn.Module):
                  kernels_size: Union[List[int], int],
                  dilations: Union[List[int], int],
                  stride: int = 1,
-                 activation: nn.Module = nn.SiLU(),
-                 residual_kernel_size: Optional[int] = None
+                 activation: nn.Module = nn.Mish(),
+                 ratio: int = 8,
+                 residual: bool = True,
                  ) -> None:
         super().__init__()
         
@@ -63,9 +63,14 @@ class MultiScaleTemporalConvolutionLayer(nn.Module):
             kernels_size = [kernels_size]
             dilations = [dilations]
         
-        num_branches += 2 # MaxPool and 1x1 conv
+        num_branches += 1 # MaxPool 
         assert out_channels % num_branches == 0, 'Number of branches in TCN not valid.'
         branch_channels = out_channels // num_branches
+        
+        #####
+        
+        self.activation = activation
+        self.norm = nn.InstanceNorm2d(in_channels)
         
         self.branches = nn.ModuleList()
         for kernel, dilation in zip(kernels_size, dilations):
@@ -74,6 +79,7 @@ class MultiScaleTemporalConvolutionLayer(nn.Module):
                     in_channels,
                     branch_channels, 
                     kernel_size=1,
+                    bias=False,
                 ), 
                 activation,
                 nn.InstanceNorm2d(branch_channels), 
@@ -82,47 +88,67 @@ class MultiScaleTemporalConvolutionLayer(nn.Module):
                     branch_channels, 
                     kernel_size=kernel,
                     dilation=dilation, 
-                    stride=stride 
+                    stride=stride,
+                    bias=False
                 )
             )
             self.branches.append(branch)
         
         # Append MaxPool
         self.branches.append(nn.Sequential(
-            nn.Conv2d(in_channels, branch_channels, kernel_size=1, padding=0),
-            activation,
-            nn.InstanceNorm2d(branch_channels),
             nn.MaxPool2d(kernel_size=(3, 1), stride=(stride, 1), padding=(1, 0)),
-            nn.InstanceNorm2d(branch_channels)
+            nn.InstanceNorm2d(in_channels),
+            nn.Conv2d(in_channels, branch_channels, kernel_size=1, padding=0, bias=False),
         ))
         
-        # Append 1x1 conv
-        self.branches.append(nn.Sequential(
-            nn.Conv2d(in_channels, branch_channels, kernel_size=1,
-                      padding=0, stride=(stride, 1)),
-            nn.InstanceNorm2d(branch_channels)
-        ))
+        # Squeeze and Excitation network
+        self.squeeze = nn.Sequential(
+            nn.Linear(out_channels, out_channels // ratio), 
+            activation,
+            nn.Linear(out_channels // ratio, out_channels),
+            nn.Sigmoid()
+        )
         
-        if residual_kernel_size is None: 
+        # Residual connections
+        
+        if not residual: 
             self.residual = lambda _: 0
         elif (in_channels == out_channels) and (stride == 1):
             self.residual = nn.Identity()
         else: 
-            self.residual = TemporalConvolution(in_channels, 
-                                           out_channels, 
-                                           kernel_size=residual_kernel_size, 
-                                           stride=stride)
+            self.residual = TemporalConvolution(
+                in_channels, 
+                out_channels, 
+                kernel_size=1, 
+                stride=stride)
 
         self.activation = activation
           
     
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        
+        x = self.activation(input)
+        x = self.norm(x)
+        
         out_branches = []
         for branch in self.branches: 
-            out_branches.append(branch(input))
+            out_branches.append(branch(x))
         
-        output = torch.cat(out_branches, dim=1)
+        # (N, C_out, T, V)
+        intermediate = torch.cat(out_branches, dim=1)
         
+        # SENet
+        N, C, T, V = intermediate.shape
+        s = intermediate.view(N, C, -1)
+        # (N, C_out)
+        s = s.mean(-1)
+        # (N, C_out)
+        s: torch.Tensor = self.squeeze(s)
+        # (N, C_out, 1, 1)
+        s = s.unsqueeze(-1).unsqueeze(-1)
+        
+        # (N, C_out, T, V)
+        output = intermediate * s
         output += self.residual(input)
         output = self.activation(output)
         

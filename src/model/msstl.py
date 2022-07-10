@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-class SpatioTemporalAttention(nn.Module):
+'''class SpatioTemporalAttention(nn.Module):
     
     def __init__(self, 
                  in_channels: int, 
@@ -82,7 +82,7 @@ class SpatioTemporalAttention(nn.Module):
         N, C, T, V = x.shape
         
         # (N, num_heads, T, V)
-        x_scores: torch.Tensor = self.query_att(x) / (self.head_channels ** 0.5)
+        x_scores: torch.Tensor = att(x) / (self.head_channels ** 0.5)
         # (N, num_head, T, V * window_size)
         x_scores = self.group_window(x_scores)
         
@@ -232,7 +232,168 @@ class SpatioTemporalAttention(nn.Module):
         # (N, C_embed, T, V)
         query_keys = keys * pooled_query
         # (N, C_embed, T, 1)
-        pooled_key = self.pool(query_keys, self.query_att)
+        pooled_key = self.pool(query_keys, self.key_att)
+        
+        # (N, C_embed, T, V)
+        values = self.value(cross_input if cross_input is not None else input)
+        # (N, C_embed, T, V)
+        values = self.transform_values(values, pooled_key, queries)
+        
+        return values'''
+        
+class SpatioTemporalAttention(nn.Module):
+    
+    def __init__(self, 
+                 in_channels: int, 
+                 embed_channels: int,
+                 num_heads: int, 
+                 window_size: int, 
+                 window_dilation: int, 
+                 cross_view: bool) -> None:
+        super().__init__()
+        assert embed_channels % num_heads == 0,\
+            'Number of embedding channels must be a multiple of the number of heads.'
+            
+        self.num_heads = num_heads
+        self.embed_channels = embed_channels
+        self.head_channels = embed_channels // num_heads
+        
+        self.window_size = window_size
+        self.window_dilation = window_dilation
+        
+        # Layers
+        
+        self.query = nn.Conv2d(in_channels, embed_channels, kernel_size=1)
+        self.query_att = nn.Conv2d(embed_channels, num_heads, kernel_size=1)
+        
+        self.key = nn.Conv2d(in_channels, embed_channels, kernel_size=1)
+        self.key_att = nn.Conv2d(embed_channels, num_heads, kernel_size=1)
+        
+        if cross_view:
+            self.value = nn.Identity()
+        else: 
+            self.value = nn.Conv2d(in_channels, embed_channels, kernel_size=1)
+        
+        self.key_value = nn.Conv2d(embed_channels, embed_channels, kernel_size=1)
+        
+        self.padding = (window_size + (window_size - 1) * (window_dilation - 1) - 1) // 2
+        self.unfold = nn.Unfold(kernel_size=(window_size, 1),
+                                dilation=(window_dilation, 1),
+                                padding=(self.padding, 0))
+        
+        self.softmax = nn.Softmax(-1)
+    
+    def group_window(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Groups vectors belonging to the same window
+        
+        Args:
+            x (torch.Tensor): tensor with shape (N, C, T, V)
+
+        Returns:
+            torch.Tensor: tensor with shape (N, C, T, V_w)
+            where V_w = V * window_size
+        """
+        N, C, T, V = x.shape
+
+        x = self.unfold(x)
+        x = x.view(N, C, self.window_size, T, V) # (N, C, window_size, T, V)
+        x = x.permute(0, 1, 3, 2, 4).contiguous() # (N, C, T, window_size, V)
+        x = x.view(N, C, T, V * self.window_size) # (N, C, T, V * window_size)
+
+        return x
+    
+    def pool(self, x: torch.Tensor, att: nn.Module) -> torch.Tensor:
+        """
+
+        Args:
+            x (torch.Tensor): tensor with shape (N, C_embed, T, V)
+            att (nn.Module): _description_
+
+        Returns:
+            torch.Tensor: tensor with shape (N, C_embed, T, 1)
+        """
+        
+        N, C, T, V = x.shape
+        
+        # (N, num_heads, T, V)
+        x_scores: torch.Tensor = att(x) / (self.head_channels ** 0.5)
+        # (N, num_head, T, V * window_size)
+        x_scores = self.group_window(x_scores)
+        
+        # (N, num_head, T, V * window_size)
+        x_weights: torch.Tensor = self.softmax(x_scores)
+        # (N, T, num_head, V * window_size)
+        x_weights = x_weights.transpose(1, 2)
+        # (N, T, num_head, 1, V * window_size)
+        x_weights = x_weights.unsqueeze(-2)
+        
+        # (N, C_embed, T, V * window_size)
+        x = self.group_window(x)
+        # (N, num_heads, C_head, T, V * window_size)
+        x = x.view(N, self.num_heads, self.head_channels, T, -1)
+        # (N, T, num_heads, V * window_size, C_head)
+        x = x.permute(0, 3, 1, 4, 2).contiguous()
+        
+        # (N, T, num_heads, 1, C_head)
+        pooled = torch.matmul(x_weights, x)
+        # (N, num_heads, C_head, T, 1)
+        pooled = pooled.permute(0, 2, 4, 1, 3).contiguous()
+        # (N, C_embed, T, 1)
+        pooled = pooled.view(N, self.embed_channels, T, 1)
+        
+        return pooled
+    
+    def transform_values(self, 
+                         values: torch.Tensor, 
+                         pooled_key: torch.Tensor, 
+                         queries: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            values (torch.Tensor): tensor with shape (N, C_embed, T, V)
+            pooled_key (torch.Tensor): tensor with shape (N, C_embed, T, 1)
+            queries (torch.Tensor): tensor with shape (N, C_embed, T, V)
+
+        Returns:
+            torch.Tensor: tensor with shape (N, C_embed, T, V)
+        """
+        
+        N, C, T, V = values.shape
+        
+        # (N, C_embed, T, V * window_size)
+        v = self.group_window(values)
+        # (N, C_embed, T, V * window_size)
+        keys_values = pooled_key * v
+        # (N, C_embed, T, V * window_size)
+        keys_values: torch.Tensor = self.key_value(keys_values)
+        
+        # (N, C_embed, T, V * window_size)
+        q = self.group_window(queries)
+        
+        # (N, C_embed, T, V * window_size)
+        output = keys_values + q
+        output = output.view(N, C, T, self.window_size, -1)
+        output = output.mean(-2)
+        
+        return output
+    
+    def forward(self, x: Tuple[torch.Tensor, Optional[torch.Tensor]]) -> torch.Tensor:
+        
+        input, cross_input = x
+        
+        N, C, T, V = input.shape
+        
+        # (N, C_embed, T, V)
+        queries: torch.Tensor = self.query(input)
+        # (N, C_embed, T, 1)
+        pooled_query = self.pool(queries, self.query_att)
+        
+        # (N, C_embed, T, V)
+        keys = self.key(input)
+        # (N, C_embed, T, V)
+        query_keys = keys * pooled_query
+        # (N, C_embed, T, 1)
+        pooled_key = self.pool(query_keys, self.key_att)
         
         # (N, C_embed, T, V)
         values = self.value(cross_input if cross_input is not None else input)
@@ -246,8 +407,6 @@ class SpatioTemporalLayer(nn.Module):
     def __init__(self,
                  in_channels: int, 
                  out_channels: int,
-                 num_frames: int, 
-                 num_nodes: int, 
                  num_heads: int,
                  window_size: int, 
                  window_dilation: int, 
@@ -267,16 +426,16 @@ class SpatioTemporalLayer(nn.Module):
         else: 
             self.residual = nn.Conv2d(in_channels, out_channels, kernel_size=1)
         
-        self.norm1 = nn.LayerNorm([in_channels, num_frames, num_nodes])
+        self.norm1 = nn.InstanceNorm2d(in_channels)
         
         self.ffn = nn.Sequential(
             nn.Conv2d(out_channels, out_channels, kernel_size=1),
-            nn.SiLU(),
+            nn.Mish(),
             nn.Conv2d(out_channels, out_channels, kernel_size=1),
             nn.Dropout(dropout)
         )
         
-        self.norm2 = nn.LayerNorm([out_channels, num_frames, num_nodes])   
+        self.norm2 = nn.InstanceNorm2d(out_channels)   
     
     def forward(self, 
                input: torch.Tensor, 
@@ -299,9 +458,7 @@ class MultiScaleSpatioTemporalLayer(nn.Module):
     
     def __init__(self,
                  in_channels: int, 
-                 out_channels: int, 
-                 num_frames: int, 
-                 num_nodes: int,
+                 out_channels: int,
                  windows_size: List[int],
                  windows_dilation: List[int],
                  num_heads: int, 
@@ -316,8 +473,9 @@ class MultiScaleSpatioTemporalLayer(nn.Module):
         self.layers = nn.ModuleList()
         for size, dilation in zip(windows_size, windows_dilation):
             layer = SpatioTemporalLayer(
-                in_channels, out_channels, num_frames, num_nodes, 
-                num_heads, size, dilation, dropout, cross_view)
+                in_channels, out_channels,
+                num_heads, size, dilation, 
+                dropout, cross_view)
             
             self.layers.append(layer)
         

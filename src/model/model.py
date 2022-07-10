@@ -7,6 +7,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from .tools import init_layers
 from .embedding import Embeddings
 from .msstl import MultiScaleSpatioTemporalLayer
 from .mstcl import MultiScaleTemporalConvolutionLayer
@@ -15,9 +16,7 @@ from ..dataset.skeleton import SkeletonGraph
 class MultiScaleSpatioTemporalBlock(nn.Module):
     def __init__(self, 
                  in_channels: int, 
-                 out_channels: int, 
-                 num_frames: int, 
-                 num_nodes: int,
+                 out_channels: int,
                  cross_view: bool, 
                  stride: int) -> None:
         super().__init__()
@@ -25,9 +24,7 @@ class MultiScaleSpatioTemporalBlock(nn.Module):
         self.spatio = MultiScaleSpatioTemporalLayer(
             in_channels=in_channels,
             out_channels=out_channels, 
-            num_frames=num_frames, 
-            num_nodes=num_nodes,
-            windows_size=[5, 5, 5], 
+            windows_size=[3, 3, 5], 
             windows_dilation=[1, 2, 3], 
             num_heads=8, 
             dropout=0.1, 
@@ -36,10 +33,10 @@ class MultiScaleSpatioTemporalBlock(nn.Module):
         self.temporal = MultiScaleTemporalConvolutionLayer(
             in_channels=out_channels, 
             out_channels=out_channels, 
-            kernels_size=[3, 3], 
-            dilations=[1, 2],
+            kernels_size=[3, 5, 7], 
+            dilations=[1, 2, 3],
             stride=stride, 
-            residual_kernel_size=3
+            residual=True
         )
         
         if in_channels == out_channels:
@@ -66,17 +63,17 @@ class Classifier(nn.Module):
                  dropout: float = 0.1) -> None:
         super().__init__()
         
-        self._dropout = nn.Dropout(dropout)
-        self._fc = nn.Linear(in_channels, num_classes)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(in_channels, num_classes)
         
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         N, M, C, _, _ = input.shape 
         input = input.view(N, M, C, -1)
         # (N, C)
         avg = input.mean(-1).mean(1)
-        avg = self._dropout(avg)
+        avg = self.dropout(avg)
         
-        return self._fc(avg)
+        return self.fc(avg)
         
 
 class Model(nn.Module):
@@ -88,13 +85,13 @@ class Model(nn.Module):
                  num_frames: int) -> None:
         super().__init__()
         
+        self.joints_norm = nn.InstanceNorm1d(9 * 2 * 25)
+        self.bones_norm = nn.InstanceNorm1d(9 * 2 * 25)
         self.embeddings = Embeddings(9, 64, num_frames, skeleton)
         
         self.blocks = nn.ModuleList()
         in_channels = 64
         out_channels = 64
-        in_frames = num_frames
-        num_nodes = 50
         for idx in range(9):
             cross_view = (idx % 3) == 1
             stride = 2 if idx == 3 or idx == 6 else 1
@@ -103,35 +100,42 @@ class Model(nn.Module):
             
             self.blocks.append(MultiScaleSpatioTemporalBlock(
                 in_channels=in_channels, 
-                out_channels=out_channels, 
-                num_frames=in_frames, 
-                num_nodes=num_nodes, 
+                out_channels=out_channels,
                 cross_view=cross_view, 
                 stride=stride
             ))
             
             in_channels = out_channels
-            if stride > 1:
-                in_frames = in_frames // 2
         
         self.classifier = Classifier(256, num_classes, dropout=0.1)
+        
+        self.apply(init_layers)
         
     def forward(self, 
                 joints: torch.Tensor, 
                 bones: torch.Tensor) -> torch.Tensor:
         
         N, C, T, V, M = joints.shape
-        joints = joints.permute(0, 4, 1, 2, 3).contiguous().view(N * M, C, T, V)
-        bones = bones.permute(0, 4, 1, 2, 3).contiguous().view(N * M, C, T, V)
+        #joints = joints.permute(0, 4, 1, 2, 3).contiguous().view(N * M, C, T, V)
+        #bones = bones.permute(0, 4, 1, 2, 3).contiguous().view(N * M, C, T, V)
         
-        # apply embeddings
-        input: torch.Tensor = self.embeddings(joints, bones)
+        # Normalize input
+        j = joints.permute(0, 4, 3, 1, 2).contiguous().view(N, M * V * C, T)
+        j: torch.Tensor = self.joints_norm(j)
+        j = j.view(N, M, V, C, T).permute(0, 1, 3, 4, 2).contiguous().view(N * M, C, T, V)
         
-        # apply blocks 
+        b = bones.permute(0, 4, 3, 1, 2).contiguous().view(N, M * V * C, T)
+        b: torch.Tensor = self.bones_norm(b)
+        b = b.view(N, M, V, C, T).permute(0, 1, 3, 4, 2).contiguous().view(N * M, C, T, V)
+        
+        # Apply embeddings
+        input: torch.Tensor = self.embeddings(j, b)
+        
+        # Apply blocks 
         for block in self.blocks:
             input = block(input)
         
-        # classify
+        # Classify
         _, C, T, V = input.shape
         # (N, M, C_out, T, V)
         output = input.view(N, -1, C, T, V)

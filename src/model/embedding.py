@@ -82,7 +82,18 @@ class Embeddings(nn.Module):
         
         N, C, T, V = joints.shape
         
-        ide = self.id_embeddings.expand(N, self._id_embed_channels, T, V)
+        if self.training:
+            # (V)
+            sign_flip = torch.rand(self.id_embeddings.size(-1), device=joints.device)
+            sign_flip[sign_flip>=0.5] = 1.0
+            sign_flip[sign_flip<0.5] = -1.0
+            sign_flip = sign_flip.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+        
+            id_embeddings = self.id_embeddings * sign_flip
+        else:
+            id_embeddings = self.id_embeddings
+        
+        ide = id_embeddings.expand(N, self._id_embed_channels, T, V)
         te = self.temporal_enc[:, :, :T, :]
         te = te.expand(N, self._out_channels, T, V)
         
