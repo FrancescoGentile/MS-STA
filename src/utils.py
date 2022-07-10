@@ -49,7 +49,7 @@ def init_logger(name: str, level: int = logging.INFO, file: Optional[str] = None
 
 def check_and_create_dir(name: str):
     if not os.path.exists(name):
-        os.mkdir(name)
+        os.makedirs(name)
     elif not os.path.isdir(name):
         raise ValueError(f'The path {name} is not a directory.')
     

@@ -47,8 +47,7 @@ class TrainingConfig:
         
         # Setup working directory
         work_dir = options.work_dir
-        time_str = strftime('%Y-%m-%d-%H-%M-%S')
-        self._work_dir = os.path.join(work_dir, f'{time_str}-train-{index}')
+        self._work_dir = os.path.join(work_dir, f'training-{index}')
         utils.check_and_create_dir(self._work_dir)
         
         # Setup log directory
@@ -60,6 +59,8 @@ class TrainingConfig:
         self._results_dir = os.path.join(self._work_dir, 'results')
         self._accuracy_file = os.path.join(self._results_dir, 'accuracy.csv')
         utils.check_and_create_dir(self._results_dir)
+        
+        self._model_file = os.path.join(self.work_dir, 'model.txt')
         
         # Checkpoints file
         self.checkpoint_file = os.path.join(self._work_dir, 'checkpoint.tar') 
@@ -100,6 +101,10 @@ class TrainingConfig:
     @property
     def log_file(self) -> str: 
         return self._log_file
+    
+    @property
+    def model_file(self) -> str:
+        return self._model_file
     
     @property
     def results_dir(self) -> str:

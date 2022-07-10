@@ -18,8 +18,19 @@ class LRSchedulerConfig:
             raise ValueError(f'No lr scheduler with the given name was found.')
         
         del options.name 
+        
+        if options.after_batch is not None:
+            self._after_batch = options.after_batch
+            del options.after_batch
+        else: 
+            self._after_batch = False
+            
         self._args = options
         
     def to_lr_scheduler(self, optimizer: Optimizer) -> _LRScheduler:
         cls =  utils.get_class_by_name('torch.optim.lr_scheduler', self._name)
         return cls(optimizer=optimizer, **self._args)
+    
+    @property
+    def after_batch(self) -> bool:
+        return self._after_batch

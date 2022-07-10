@@ -11,11 +11,11 @@ from .generator import DatasetGenerator
 
 class DatasetConfigBuilder:
     @staticmethod
-    def build(options, generate: bool, train_or_test: bool) -> DatasetConfig:
+    def build(options, generate: bool) -> DatasetConfig:
         if options.name is None:
             raise ValueError(f'Dataset name not provided.')
         if options.name in NTU_DATASET_NAMES: 
-            return NTUDatasetConfig(options, generate, train_or_test)
+            return NTUDatasetConfig(options, generate)
         else: 
             raise ValueError(f'No dataset {options.name} exists.')
 

@@ -9,6 +9,7 @@ import csv
 import numpy as np
 from timeit import default_timer as timer
 from tqdm import tqdm
+from prettytable import PrettyTable
 
 import torch
 from torch.utils.data import DataLoader
@@ -145,6 +146,24 @@ class TrainingProcessor:
         
         self._logger.info(f'Model: {self._config.model_config.name}')
         
+        with open(self._config.model_file, 'w') as f:
+            print(model, file=f)
+            
+        table = PrettyTable(["Modules", "Parameters"])
+        total_params = 0
+        for name, parameter in model.named_parameters():
+            if not parameter.requires_grad: 
+                continue
+            params = parameter.numel()
+            table.add_row([name, params])
+            total_params+=params
+        
+        with open(os.path.join(self._config.work_dir, 'parameters.txt'), 'w') as f:
+            print(table, file=f)
+            print(f'Total number of parameters: {total_params}', file=f)
+            
+        self._logger.info(f'Model profile: {total_params/1e6:.2f}M parameters ({total_params})')
+        
         if self._checkpoint is not None: 
             model.load_state_dict(self._checkpoint['model'])
             self._logger.info('Successfully loaded model state from checkpoint')
@@ -170,7 +189,7 @@ class TrainingProcessor:
         return lr_scheduler
     
     def _get_loss(self):
-        loss_func = nn.CrossEntropyLoss().to(self._device)
+        loss_func = nn.CrossEntropyLoss(label_smoothing=0.1).to(self._device)
         self._logger.info(f'Loss function used: {loss_func.__class__.__name__}')
         
         return loss_func
@@ -180,6 +199,8 @@ class TrainingProcessor:
         
         num_samples, num_top1, num_top5 = 0, 0, 0
         train_losses = []
+        
+        lr_scheduler_after_batch = self._config.lr_scheduler_config.after_batch
         
         train_iter = tqdm(self._train_loader)
         start_time = timer()
@@ -191,14 +212,17 @@ class TrainingProcessor:
             y: torch.Tensor = y.long().to(self._device)
             
             # Computing logits
-            logits = self._model(j, b)
+            with torch.cuda.amp.autocast():
+                logits = self._model(j, b)
+                loss: torch.Tensor = self._loss_func(logits, y)
             
             # Updating weights
-            loss: torch.Tensor = self._loss_func(logits, y)
             loss.backward()
             train_losses.append(loss.detach().item())
             self._optimizer.step()
-            self._lr_scheduler.step()
+            
+            if lr_scheduler_after_batch:
+                self._lr_scheduler.step()
             
             num_samples += j.size(0)
              # Computing top1
@@ -213,6 +237,9 @@ class TrainingProcessor:
             del y
         
         end_time = timer()
+        
+        if not lr_scheduler_after_batch:
+            self._lr_scheduler.step()
         
         # Computing statistics
         train_time = end_time - start_time
@@ -253,10 +280,11 @@ class TrainingProcessor:
                 y: torch.Tensor = y.long().to(self._device)
                 
                 # Computing logits
-                logits = self._model(j, b)
+                with torch.cuda.amp.autocast():
+                    logits = self._model(j, b)
+                    loss: torch.Tensor = self._loss_func(logits, y)
                 
-                loss: torch.Tensor = self._loss_func(logits, y)
-                eval_losses.append(loss.item())
+                eval_losses.append(loss.detach().item())
                 
                 num_samples += j.size(0)
                 # Computing top1

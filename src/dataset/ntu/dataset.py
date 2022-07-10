@@ -30,6 +30,9 @@ class NTUDataset(Dataset):
         if self._config.debug: 
             self._data = self._data[:300]
             self._labels = self._labels[:300]
+        
+        if self._config.normalize:
+            self._mean_map, self._std_map = self._get_mean_map()
     
     def _load_data(self, train: bool):
         phase = 'train' if train else 'test'
@@ -48,6 +51,14 @@ class NTUDataset(Dataset):
             raise e
 
         return data, labels
+    
+    def _get_mean_map(self) -> Tuple[np.ndarray, np.ndarray]:
+        data: np.ndarray = self._data
+        N, C, T, V, M = data.shape
+        mean_map = data.mean(axis=2, keepdims=True).mean(axis=4, keepdims=True).mean(axis=0)
+        std_map = data.transpose((0, 2, 4, 1, 3)).reshape((N * T * M, C * V)).std(axis=0).reshape((C, 1, V, 1))
+        
+        return mean_map, std_map
     
     def __len__(self): 
         return len(self._labels)

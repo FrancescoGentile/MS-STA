@@ -16,8 +16,7 @@ class NTUDatasetConfig(DatasetConfig):
     
     def __init__(self, 
                  options: dict, 
-                 generate: bool, 
-                 train_or_test: bool) -> None:
+                 generate: bool) -> None:
         self.name = options.name
         if self.name is None or self.name not in NTU_DATASET_NAMES:
             raise ValueError(f'The dataset {self.name} is not valid.')
@@ -29,9 +28,11 @@ class NTUDatasetConfig(DatasetConfig):
         self.num_coords = 3
         self.num_people = 2
         
-        self.num_frames = options.num_frames
-        if self.num_frames is None and train_or_test:
-            raise ValueError('Missing number of frames in dataset configuration.')
+        self.num_frames = options.num_frames \
+            if options.num_frames is not None else self.max_frames
+        
+        self.normalize = options.normalize \
+            if options.normalize is not None else False
         
         self.ntu60_path, self.ntu120_path, self.ignored_file = \
             self._get_paths(options, generate)

@@ -33,14 +33,18 @@ class Config:
         self.work_dir = options.work_dir
         if self.work_dir is None:
             self.work_dir = './work_dir'
+            
+        self.work_dir = os.path.join(self.work_dir, strftime('%Y-%m-%d-%H-%M-%S'))
         utils.check_and_create_dir(self.work_dir)
-        time = strftime('%Y-%m-%d-%H-%M-%S')
-        self.log_file = os.path.join(self.work_dir, f'{time}.log')
+        
+        config_name = os.path.splitext(config_file)[0]
+        config_name = os.path.basename(config_name)
+        self.log_file = os.path.join(self.work_dir, f'{config_name}.log')
         
         self.gpus = options.gpus
         self.seed = options.seed
         
-        self.datasets_config = Config._get_datasets(options, generate, train or test)
+        self.datasets_config = Config._get_datasets(options, generate)
         self.models_config = Config._get_models(options, train, test)
         self.optimizers_config = Config._get_optimizers(options, train)
         self.lr_schedulers_config = Config._get_lr_schedulers(options, train)
@@ -63,7 +67,7 @@ class Config:
         return options
 
     @staticmethod
-    def _get_datasets(options: dict, generate: bool, train_or_test: bool) -> List[DatasetConfig]:
+    def _get_datasets(options: dict, generate: bool) -> List[DatasetConfig]:
         dataset_options = options.datasets
         if dataset_options is None: 
             raise ValueError('No config options for datasets were provided.')
@@ -73,7 +77,7 @@ class Config:
         
         datasets = []
         for opt in dataset_options:
-            datasets.append(DatasetConfigBuilder.build(opt, generate, train_or_test))
+            datasets.append(DatasetConfigBuilder.build(opt, generate))
         
         return datasets
     
