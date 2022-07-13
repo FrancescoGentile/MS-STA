@@ -23,16 +23,17 @@ class NTUDatasetConfig(DatasetConfig):
         
         self.debug = options.debug
         
-        self.max_frames = 300
+        self.num_frames = options.generate_args.num_frames
+        if self.num_frames is None and generate:
+            raise ValueError(f'Missing num_frames config.')
+       
         self.num_joints = 25
         self.num_coords = 3
         self.num_people = 2
         
-        self.num_frames = options.num_frames \
-            if options.num_frames is not None else self.max_frames
-        
-        self.normalize = options.normalize \
-            if options.normalize is not None else False
+        self.normalize = options.generate_args.normalize
+        if self.normalize is None:
+            self.normalize = False
         
         self.ntu60_path, self.ntu120_path, self.ignored_file = \
             self._get_paths(options, generate)

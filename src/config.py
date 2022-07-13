@@ -44,7 +44,7 @@ class Config:
         self.gpus = options.gpus
         self.seed = options.seed
         
-        self.datasets_config = Config._get_datasets(options, generate)
+        self.datasets_config = self._get_datasets(options, generate)
         self.models_config = Config._get_models(options, train, test)
         self.optimizers_config = Config._get_optimizers(options, train)
         self.lr_schedulers_config = Config._get_lr_schedulers(options, train)
@@ -66,8 +66,7 @@ class Config:
         
         return options
 
-    @staticmethod
-    def _get_datasets(options: dict, generate: bool) -> List[DatasetConfig]:
+    def _get_datasets(self, options: dict, generate: bool) -> List[DatasetConfig]:
         dataset_options = options.datasets
         if dataset_options is None: 
             raise ValueError('No config options for datasets were provided.')
@@ -77,6 +76,7 @@ class Config:
         
         datasets = []
         for opt in dataset_options:
+            opt.debug = self.debug
             datasets.append(DatasetConfigBuilder.build(opt, generate))
         
         return datasets

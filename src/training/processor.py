@@ -10,17 +10,32 @@ import numpy as np
 from timeit import default_timer as timer
 from tqdm import tqdm
 from prettytable import PrettyTable
+import random
+import os
 
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import torch.nn as nn
+from torch.cuda.amp import GradScaler, autocast
 
 from ..model.model import Model
 from ..dataset.dataset import Dataset
 from ..dataset.skeleton import SkeletonGraph
 from .. import utils
 from .config import TrainingConfig
+
+def nan_hook(self, inp, output):
+    if not isinstance(output, tuple):
+        outputs = [output]
+    else:
+        outputs = output
+
+    for i, out in enumerate(outputs):
+        nan_mask = torch.isnan(out)
+        if nan_mask.any():
+            print("In", self.__class__.__name__)
+            raise RuntimeError(f"Found NAN in output {i} at indices: ", nan_mask.nonzero(), "where:", out[nan_mask.nonzero()[:, 0].unique(sorted=True)])
         
 class TrainingProcessor: 
     
@@ -46,11 +61,17 @@ class TrainingProcessor:
         self._loss_func = self._get_loss()
         
     def _init_environment(self):
+        torch.set_default_dtype(torch.float32)
         np.random.seed(self._config.seed)
+        random.seed(self._config.seed)
         torch.manual_seed(self._config.seed)
         torch.cuda.manual_seed(self._config.seed)
-        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.enabled = True
+        torch.use_deterministic_algorithms(True)
+        os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+        
+        self._scaler = GradScaler()
         
     def _init_accuracy_file(self):
         with open(self._config.accuracy_file, 'w', newline='') as f:
@@ -130,7 +151,7 @@ class TrainingProcessor:
 
         eval_loader = DataLoader(dataset=eval_dataset, 
                                  batch_size=self._config.eval_batch_size, 
-                                 num_workers=4 * len(self._config.gpus),
+                                 num_workers=1,
                                  pin_memory=True, 
                                  shuffle=False, 
                                  drop_last=False)
@@ -163,6 +184,9 @@ class TrainingProcessor:
             print(f'Total number of parameters: {total_params}', file=f)
             
         self._logger.info(f'Model profile: {total_params/1e6:.2f}M parameters ({total_params})')
+        
+        #for submodule in model.modules():
+            #submodule.register_forward_hook(nan_hook)   
         
         if self._checkpoint is not None: 
             model.load_state_dict(self._checkpoint['model'])
@@ -212,13 +236,24 @@ class TrainingProcessor:
             y: torch.Tensor = y.long().to(self._device)
             
             # Computing logits
-            with torch.cuda.amp.autocast():
-                logits = self._model(j, b)
-                loss: torch.Tensor = self._loss_func(logits, y)
+            #with autocast():
+            logits = self._model(j, b)
+            loss: torch.Tensor = self._loss_func(logits, y)
+            loss.backward()
+                
+            train_losses.append(loss.detach().item())
+            
+            '''
+            self._scaler.scale(loss).backward()
+            self._scaler.unscale_(self._optimizer)
+            torch.nn.utils.clip_grad_value_(self._model.parameters(), 5.0)
+            self._scaler.step(self._optimizer)
+            self._scaler.update()
+            '''
             
             # Updating weights
-            loss.backward()
-            train_losses.append(loss.detach().item())
+            #loss.backward()
+            #torch.nn.utils.clip_grad_value_(self._model.parameters(), 5.0)
             self._optimizer.step()
             
             if lr_scheduler_after_batch:
@@ -249,10 +284,11 @@ class TrainingProcessor:
         top5_acc = num_top5 / num_samples
         train_loss = np.mean(train_losses)
         
+        last_lr_rate = self._lr_scheduler.get_last_lr()[-1]
         # Log statistics
         self._logger.info(f'Train epoch {epoch}')
         self._logger.info(f'\tTraining time: {train_time:.2f}s - Speed: {train_speed:.2f} samples/(second * GPU')
-        self._logger.info(f'\tLearning rate: {self._lr_scheduler.get_last_lr():.5f}')
+        self._logger.info(f'\tLearning rate: {last_lr_rate:.5f}')
         self._logger.info(f'\tTop-1 accuracy {num_top1:d}/{num_samples:d} ({top1_acc:.2%})')
         self._logger.info(f'\tTop-5 accuracy {num_top5:d}/{num_samples:d} ({top5_acc:.2%})')
         self._logger.info(f'\tMean loss: {train_loss:.5f}')
@@ -261,13 +297,13 @@ class TrainingProcessor:
         self._writer.add_scalar('train/top1_accuracy', top1_acc, epoch)
         self._writer.add_scalar('train/top5_accuracy', top5_acc, epoch)
         self._writer.add_scalar('train/loss', train_loss, epoch)
-        self._writer.add_scalar('train/learning_rate', self._lr_scheduler.get_last_lr(), epoch)
+        self._writer.add_scalar('train/learning_rate', last_lr_rate, epoch)
             
     def _eval(self, epoch: int) -> Tuple[float, float, np.ndarray]:
         self._model.eval()
         
         with torch.no_grad():
-            num_samples, num_top1, num_top5 = 0, 0
+            num_samples, num_top1, num_top5 = 0, 0, 0
             eval_losses = []
             cm = np.zeros((self._num_classes, self._num_classes))
             
@@ -280,9 +316,9 @@ class TrainingProcessor:
                 y: torch.Tensor = y.long().to(self._device)
                 
                 # Computing logits
-                with torch.cuda.amp.autocast():
-                    logits = self._model(j, b)
-                    loss: torch.Tensor = self._loss_func(logits, y)
+                #with torch.cuda.amp.autocast():
+                logits = self._model(j, b)
+                loss: torch.Tensor = self._loss_func(logits, y)
                 
                 eval_losses.append(loss.detach().item())
                 
@@ -303,6 +339,9 @@ class TrainingProcessor:
                 del y
         
         end_time = timer()
+        
+        print(eval_losses)
+        exit(1)
         
         # Computing statistics
         eval_time = end_time - start_time

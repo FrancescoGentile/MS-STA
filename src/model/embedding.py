@@ -58,7 +58,7 @@ class Embeddings(nn.Module):
         joint_embed = joint_embed.unsqueeze(0).unsqueeze(-1).unsqueeze(-1) #(1, C, 1, 1)
         
         bone_embed = torch.empty(type_len)
-        nn.init.uniform_(joint_embed, -bound, +bound)
+        nn.init.uniform_(bone_embed, -bound, +bound)
         bone_embed = bone_embed.unsqueeze(0).unsqueeze(-1).unsqueeze(-1) # (1, C, 1, 1)
         
         return joint_embed, bone_embed, type_len

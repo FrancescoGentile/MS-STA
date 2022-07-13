@@ -28,8 +28,8 @@ class NTUDataset(Dataset):
         
         self._data, self._labels = self._load_data(train)
         if self._config.debug: 
-            self._data = self._data[:300]
-            self._labels = self._labels[:300]
+            self._data = self._data[:50]
+            self._labels = self._labels[:50]
         
         if self._config.normalize:
             self._mean_map, self._std_map = self._get_mean_map()
@@ -66,7 +66,6 @@ class NTUDataset(Dataset):
     def __getitem__(self, index: int) -> Tuple[np.ndarray, int, str]:
         data = torch.from_numpy(np.array(self._data[index]))
         label = torch.tensor(self._labels[index])
-        data = data[:, :self._config.num_frames]
         
         C, T, V, M = data.shape
         joints = torch.zeros((C * 3, T, V, M))
@@ -86,7 +85,7 @@ class NTUDataset(Dataset):
             bone_length += bones[c,:,:,:] ** 2
         bone_length = np.sqrt(bone_length) + 0.0001
         for c in range(C):
-            bones[C+c] = np.arccos(bones[c] / bone_length)
+            bones[C*2+c] = np.arccos(bones[c] / bone_length)
         
         return joints, bones, label
     

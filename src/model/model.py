@@ -50,7 +50,7 @@ class MultiScaleSpatioTemporalBlock(nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         
         output = self.spatio(input)
-        output= self.temporal(output)
+        output = self.temporal(output)
         output += self.residual(input)
         
         return output
@@ -85,9 +85,12 @@ class Model(nn.Module):
                  num_frames: int) -> None:
         super().__init__()
         
-        self.joints_norm = nn.InstanceNorm1d(9 * 2 * 25)
-        self.bones_norm = nn.InstanceNorm1d(9 * 2 * 25)
+        self.joints_norm = nn.BatchNorm1d(9 * 2 * 25)
+        self.bones_norm = nn.BatchNorm1d(9 * 2 * 25)
         self.embeddings = Embeddings(9, 64, num_frames, skeleton)
+        
+        self.norm = nn.BatchNorm2d(64)
+        self.dropout = nn.Dropout(p = 0.1)
         
         self.blocks = nn.ModuleList()
         in_channels = 64
@@ -116,9 +119,10 @@ class Model(nn.Module):
                 bones: torch.Tensor) -> torch.Tensor:
         
         N, C, T, V, M = joints.shape
-        #joints = joints.permute(0, 4, 1, 2, 3).contiguous().view(N * M, C, T, V)
-        #bones = bones.permute(0, 4, 1, 2, 3).contiguous().view(N * M, C, T, V)
+        j = joints.permute(0, 4, 1, 2, 3).contiguous().view(N * M, C, T, V)
+        b = bones.permute(0, 4, 1, 2, 3).contiguous().view(N * M, C, T, V)
         
+        '''
         # Normalize input
         j = joints.permute(0, 4, 3, 1, 2).contiguous().view(N, M * V * C, T)
         j: torch.Tensor = self.joints_norm(j)
@@ -127,9 +131,12 @@ class Model(nn.Module):
         b = bones.permute(0, 4, 3, 1, 2).contiguous().view(N, M * V * C, T)
         b: torch.Tensor = self.bones_norm(b)
         b = b.view(N, M, V, C, T).permute(0, 1, 3, 4, 2).contiguous().view(N * M, C, T, V)
+        '''
         
         # Apply embeddings
         input: torch.Tensor = self.embeddings(j, b)
+        input = self.norm(input)
+        input = self.dropout(input)
         
         # Apply blocks 
         for block in self.blocks:

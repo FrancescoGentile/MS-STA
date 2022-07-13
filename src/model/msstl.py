@@ -307,7 +307,7 @@ class SpatioTemporalAttention(nn.Module):
         """
 
         Args:
-            x (torch.Tensor): tensor with shape (N, C_embed, T, V)
+            x (torch.Tensor): tensor with shape (N, C_embed, T, V * window_size)
             att (nn.Module): _description_
 
         Returns:
@@ -316,10 +316,8 @@ class SpatioTemporalAttention(nn.Module):
         
         N, C, T, V = x.shape
         
-        # (N, num_heads, T, V)
+        # (N, num_heads, T, V * window_size)
         x_scores: torch.Tensor = att(x) / (self.head_channels ** 0.5)
-        # (N, num_head, T, V * window_size)
-        x_scores = self.group_window(x_scores)
         
         # (N, num_head, T, V * window_size)
         x_weights: torch.Tensor = self.softmax(x_scores)
@@ -328,8 +326,6 @@ class SpatioTemporalAttention(nn.Module):
         # (N, T, num_head, 1, V * window_size)
         x_weights = x_weights.unsqueeze(-2)
         
-        # (N, C_embed, T, V * window_size)
-        x = self.group_window(x)
         # (N, num_heads, C_head, T, V * window_size)
         x = x.view(N, self.num_heads, self.head_channels, T, -1)
         # (N, T, num_heads, V * window_size, C_head)
@@ -350,9 +346,9 @@ class SpatioTemporalAttention(nn.Module):
                          queries: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            values (torch.Tensor): tensor with shape (N, C_embed, T, V)
+            values (torch.Tensor): tensor with shape (N, C_embed, T, V * window_size)
             pooled_key (torch.Tensor): tensor with shape (N, C_embed, T, 1)
-            queries (torch.Tensor): tensor with shape (N, C_embed, T, V)
+            queries (torch.Tensor): tensor with shape (N, C_embed, T, V * window_size)
 
         Returns:
             torch.Tensor: tensor with shape (N, C_embed, T, V)
@@ -361,17 +357,12 @@ class SpatioTemporalAttention(nn.Module):
         N, C, T, V = values.shape
         
         # (N, C_embed, T, V * window_size)
-        v = self.group_window(values)
-        # (N, C_embed, T, V * window_size)
-        keys_values = pooled_key * v
+        keys_values = pooled_key * values
         # (N, C_embed, T, V * window_size)
         keys_values: torch.Tensor = self.key_value(keys_values)
         
         # (N, C_embed, T, V * window_size)
-        q = self.group_window(queries)
-        
-        # (N, C_embed, T, V * window_size)
-        output = keys_values + q
+        output = keys_values + queries
         output = output.view(N, C, T, self.window_size, -1)
         output = output.mean(-2)
         
@@ -383,19 +374,25 @@ class SpatioTemporalAttention(nn.Module):
         
         N, C, T, V = input.shape
         
-        # (N, C_embed, T, V)
+        # (N, C, T, V * window_size)
+        input = self.group_window(input)
+        
+        # (N, C_embed, T, V * window_size)
         queries: torch.Tensor = self.query(input)
         # (N, C_embed, T, 1)
         pooled_query = self.pool(queries, self.query_att)
         
-        # (N, C_embed, T, V)
+        # (N, C_embed, T, V * window_size)
         keys = self.key(input)
-        # (N, C_embed, T, V)
+        # (N, C_embed, T, V * window_size)
         query_keys = keys * pooled_query
         # (N, C_embed, T, 1)
         pooled_key = self.pool(query_keys, self.key_att)
         
-        # (N, C_embed, T, V)
+        if cross_input is not None:
+            cross_input = self.group_window(cross_input)
+        
+        # (N, C_embed, T, V * window_size)
         values = self.value(cross_input if cross_input is not None else input)
         # (N, C_embed, T, V)
         values = self.transform_values(values, pooled_key, queries)
@@ -418,38 +415,36 @@ class SpatioTemporalLayer(nn.Module):
             SpatioTemporalAttention(
                 in_channels, out_channels, num_heads, 
                 window_size, window_dilation, cross_view),
-            nn.Dropout(dropout)
+            ##nn.Dropout(dropout)
         )
+        self.norm1 = nn.BatchNorm2d(out_channels)
         
         if in_channels == out_channels:
             self.residual = nn.Identity()
         else: 
             self.residual = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-        
-        self.norm1 = nn.InstanceNorm2d(in_channels)
-        
+         
         self.ffn = nn.Sequential(
-            nn.Conv2d(out_channels, out_channels, kernel_size=1),
-            nn.Mish(),
-            nn.Conv2d(out_channels, out_channels, kernel_size=1),
-            nn.Dropout(dropout)
+            nn.Conv2d(out_channels, out_channels, kernel_size=1, bias=False),
+            nn.Mish(inplace=True),
+            nn.BatchNorm2d(out_channels),
+            nn.Conv2d(out_channels, out_channels, kernel_size=1, bias=False),
+            ##nn.Dropout(dropout)
         )
-        
-        self.norm2 = nn.InstanceNorm2d(out_channels)   
+        self.norm2 = nn.BatchNorm2d(out_channels)
     
     def forward(self, 
                input: torch.Tensor, 
                cross_input: Optional[torch.Tensor] = None) -> torch.Tensor:
         
         # attention sublayer
-        intermediate = self.norm1(input) # We use PreLN
         intermediate = self.attention((input, cross_input))
-        intermediate += self.residual(input)
+        res = self.residual(input)
+        intermediate = self.norm1(intermediate + res)
         
         # position-wise feed forward sublayer
-        output = self.norm2(intermediate)
         output = self.ffn(intermediate)
-        output += intermediate
+        output = self.norm2(output + intermediate)
         
         return output
         
@@ -470,25 +465,46 @@ class MultiScaleSpatioTemporalLayer(nn.Module):
         
         self.cross_view = cross_view
         
-        self.layers = nn.ModuleList()
+        num_branches = len(windows_size)
+        self.branches = nn.ModuleList()
         for size, dilation in zip(windows_size, windows_dilation):
-            layer = SpatioTemporalLayer(
+            branch = SpatioTemporalLayer(
                 in_channels, out_channels,
                 num_heads, size, dilation, 
                 dropout, cross_view)
             
-            self.layers.append(layer)
+            self.branches.append(branch)
+        
+        if in_channels == out_channels:
+            self.residual = nn.Identity()
+        else: 
+            self.residual = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+            
+        self.conc = nn.Conv2d(num_branches * out_channels, out_channels, kernel_size=1)
+        
+        self.norm = nn.BatchNorm2d(out_channels)
+        self.act = nn.Mish(inplace=True)
         
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         
         cross_input = None
+        #output = []
         output = 0
         
-        for layer in self.layers:
+        for layer in self.branches:
             tmp = layer(input, cross_input)
+            #output.append(tmp)
             output += tmp
             
             if self.cross_view:
                 cross_input = tmp
+        
+        '''
+        output = torch.cat(output, dim=1)
+        output = self.conc(output)
+        output = self.act(output)
+        output = self.norm(output)
+        output += self.residual(input)
+        '''
         
         return output

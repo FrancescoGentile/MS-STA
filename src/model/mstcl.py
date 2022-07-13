@@ -40,7 +40,7 @@ class MultiScaleTemporalConvolutionLayer(nn.Module):
                  kernels_size: Union[List[int], int],
                  dilations: Union[List[int], int],
                  stride: int = 1,
-                 activation: nn.Module = nn.Mish(),
+                 activation: nn.Module = nn.Mish(inplace=True),
                  ratio: int = 8,
                  residual: bool = True,
                  ) -> None:
@@ -69,9 +69,6 @@ class MultiScaleTemporalConvolutionLayer(nn.Module):
         
         #####
         
-        self.activation = activation
-        self.norm = nn.InstanceNorm2d(in_channels)
-        
         self.branches = nn.ModuleList()
         for kernel, dilation in zip(kernels_size, dilations):
             branch = nn.Sequential(
@@ -82,7 +79,7 @@ class MultiScaleTemporalConvolutionLayer(nn.Module):
                     bias=False,
                 ), 
                 activation,
-                nn.InstanceNorm2d(branch_channels), 
+                nn.BatchNorm2d(branch_channels), 
                 TemporalConvolution(
                     branch_channels, 
                     branch_channels, 
@@ -90,15 +87,18 @@ class MultiScaleTemporalConvolutionLayer(nn.Module):
                     dilation=dilation, 
                     stride=stride,
                     bias=False
-                )
+                ),
+                activation, 
+                nn.BatchNorm2d(branch_channels)
             )
             self.branches.append(branch)
         
         # Append MaxPool
         self.branches.append(nn.Sequential(
             nn.MaxPool2d(kernel_size=(3, 1), stride=(stride, 1), padding=(1, 0)),
-            nn.InstanceNorm2d(in_channels),
             nn.Conv2d(in_channels, branch_channels, kernel_size=1, padding=0, bias=False),
+            nn.BatchNorm2d(branch_channels),
+            activation,
         ))
         
         # Squeeze and Excitation network
@@ -121,18 +121,12 @@ class MultiScaleTemporalConvolutionLayer(nn.Module):
                 out_channels, 
                 kernel_size=1, 
                 stride=stride)
-
-        self.activation = activation
           
-    
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        
-        x = self.activation(input)
-        x = self.norm(x)
         
         out_branches = []
         for branch in self.branches: 
-            out_branches.append(branch(x))
+            out_branches.append(branch(input))
         
         # (N, C_out, T, V)
         intermediate = torch.cat(out_branches, dim=1)
@@ -150,6 +144,5 @@ class MultiScaleTemporalConvolutionLayer(nn.Module):
         # (N, C_out, T, V)
         output = intermediate * s
         output += self.residual(input)
-        output = self.activation(output)
         
         return output

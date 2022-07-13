@@ -9,6 +9,9 @@ import logging
 import numpy as np
 from tqdm import tqdm
 
+import torch
+import torch.nn.functional as F
+
 from src.dataset.ntu.config import NTUDatasetConfig
 from src.dataset.generator import DatasetGenerator
 import src.utils as utils
@@ -409,15 +412,24 @@ class NTUDatasetGenerator(DatasetGenerator):
         return joints
     
     def _align_frames(self, joints: np.ndarray) -> np.ndarray:
-        aligned_joints = np.zeros((self.config.max_frames, 150))
-        num_frames = joints.shape[0]
-        num_bodies = 1 if joints.shape[1] == 75 else 2
-        if num_bodies == 1:
-            aligned_joints[:num_frames] = np.hstack((joints, joints))
-        else:
-            aligned_joints[:num_frames] = joints
         
-        return aligned_joints
+        T, V = joints.shape
+        if V == 75:
+            new_joints = np.zeros((T, 150))
+            new_joints[:] = np.hstack((joints, joints))
+            joints = new_joints
+        
+        # (T, M, V, C)
+        joints = joints.reshape((T, 2, 25, 3))
+        # (M, C, V, T)
+        joints = joints.transpose(1, 3, 2, 0)
+        joints = torch.from_numpy(joints).to(dtype=torch.float32)
+        joints: torch.Tensor = F.interpolate(joints, (25, self.config.num_frames), mode='bilinear', align_corners=False)
+        
+        joints: np.ndarray = joints.numpy()
+        # (T, C, V, M)
+        joints = joints.transpose(1, 3, 2, 0)
+        return joints
             
     def _get_sequence_joints(self, folder: str, filename: str) -> np.ndarray:
         """
@@ -433,25 +445,61 @@ class NTUDatasetGenerator(DatasetGenerator):
         joints = self._translate_sequence(joints)
         joints = self._align_frames(joints)
         
-        T, _ = joints.shape
-        joints = joints.reshape((T, 2, 25, 3)).transpose(3, 0, 2, 1)
-        
         return joints
+    
+    def _get_mean_map(self, data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        N, C, T, V, M = data.shape
+        mean_map = data.mean(axis=2, keepdims=True).mean(axis=4, keepdims=True).mean(axis=0)
+        std_map = data.transpose((0, 2, 4, 1, 3)).reshape((N * T * M, C * V)).std(axis=0).reshape((C, 1, V, 1))
+        
+        return mean_map, std_map
                             
-    def _gendata(self, phase: str, training_samples: list): 
+    def _gendata(self, files: List[Tuple[str, str]], phase: str): 
         data = []
         labels = []
 
-        for (folder, filename) in tqdm(self.file_list, desc=f'{self.config.name}-{phase}'):
+        for (folder, filename) in tqdm(files, desc=f'{self.config.name}-{phase}'):
+            action_loc = filename.find('A')
+            action_class = int(filename[(action_loc+1):(action_loc+4)])
+            
+            joints = self._get_sequence_joints(folder, filename)
+            data.append(joints)
+            labels.append(action_class - 1) # to 0-indexed
+        
+        # Save joints
+        data = np.array(data)
+        
+        if self.config.normalize:
+            mean = data.mean(axis=(0, 2, 3, 4))
+            mean = mean[None, :, None, None, None]
+            std = data.std(axis=(0, 2, 3, 4))
+            std = std[None, :, None, None, None]
+            data = (data - mean) / std
+        
+        data_file = os.path.join(self.config.dataset_path, f'{phase}_data.npy')
+        self.logger.info(f'Saving skeletons data in {data_file}')
+        np.save(data_file, data)
+        
+        # Save labels
+        labels = np.array(labels)
+        labels_file = os.path.join(self.config.dataset_path, f'{phase}_labels.npy')
+        self.logger.info(f'Saving labels data in {labels_file}')
+        np.save(labels_file, labels)
+    
+    def _get_train_test_split(self) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
+        train = []
+        test = []
+        
+        training_samples = self._get_training_samples()
+        
+        for (folder, filename) in self.file_list:
             
             setup_loc = filename.find('S')
             camera_loc = filename.find('C')
             subject_loc = filename.find('P')
-            action_loc = filename.find('A')
             setup_id = int(filename[(setup_loc+1):(setup_loc+4)])
             camera_id = int(filename[(camera_loc+1):(camera_loc+4)])
             subject_id = int(filename[(subject_loc+1):(subject_loc+4)])
-            action_class = int(filename[(action_loc+1):(action_loc+4)])
             
             if self.config.name == 'ntu60-xview':
                 is_training_sample = (camera_id in training_samples)
@@ -466,27 +514,20 @@ class NTUDatasetGenerator(DatasetGenerator):
                 else: 
                     self.logger.error(e)
                 raise e
-            if (phase == 'train' and not is_training_sample) or (phase == 'test' and is_training_sample):
-                continue
             
-            joints = self._get_sequence_joints(folder, filename)
-            data.append(joints)
-            labels.append(action_class - 1) # to 0-indexed
+            if is_training_sample:
+                train.append((folder, filename))
+            else:
+                test.append((folder, filename))
         
-        # Save joints
-        data = np.array(data)
-        data_file = os.path.join(self.config.dataset_path, f'{phase}_data.npy')
-        self.logger.info(f'Saving skeletons data in {data_file}')
-        np.save(data_file, data)
-        
-        # Save labels
-        labels = np.array(labels)
-        labels_file = os.path.join(self.config.dataset_path, f'{phase}_labels.npy')
-        self.logger.info(f'Saving labels data in {labels_file}')
-        np.save(labels_file, labels)
+        return train, test
             
     def start(self):
-        training_samples = self._get_training_samples()
-        for phase in ['train', 'test']:
-            self.logger.info(f'Generating {phase} data of {self.config.name} dataset')
-            self._gendata(phase, training_samples)
+        train_files, test_files = self._get_train_test_split()
+        
+        self.logger.info(f'Generating training data of {self.config.name} dataset')
+        self._gendata(train_files, 'train')
+        
+        self.logger.info(f'Generating test data of {self.config.name} dataset')
+        self._gendata(test_files, 'test')
+        
