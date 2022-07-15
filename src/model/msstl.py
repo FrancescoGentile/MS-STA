@@ -465,7 +465,7 @@ class MultiScaleSpatioTemporalLayer(nn.Module):
         
         self.cross_view = cross_view
         
-        num_branches = len(windows_size)
+        #num_branches = len(windows_size)
         self.branches = nn.ModuleList()
         for size, dilation in zip(windows_size, windows_dilation):
             branch = SpatioTemporalLayer(
@@ -475,6 +475,7 @@ class MultiScaleSpatioTemporalLayer(nn.Module):
             
             self.branches.append(branch)
         
+        '''
         if in_channels == out_channels:
             self.residual = nn.Identity()
         else: 
@@ -484,6 +485,9 @@ class MultiScaleSpatioTemporalLayer(nn.Module):
         
         self.norm = nn.BatchNorm2d(out_channels)
         self.act = nn.Mish(inplace=True)
+        '''
+        
+        self.norm = nn.BatchNorm2d(out_channels)
         
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         
@@ -506,5 +510,7 @@ class MultiScaleSpatioTemporalLayer(nn.Module):
         output = self.norm(output)
         output += self.residual(input)
         '''
+        
+        output = self.norm(output)
         
         return output

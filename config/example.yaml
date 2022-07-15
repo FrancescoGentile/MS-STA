@@ -10,11 +10,11 @@ seed: 3407
 datasets:
   - name: 'ntu60-xsub'
     dataset_path: 'data/ntu60-xsub'
+    normalize: True
     generate_args: 
       ignored_file: 'data/ignore.txt'
       ntu60_path: 'data/nturgbd_skeletons_s001_to_s017'
       num_frames: 64
-      normalize: True
 
 models:
   - name: 'MS-STA'
@@ -26,7 +26,7 @@ tests:
 trainings: 
   - model: 0
     dataset: 0
-    train_batch_size: 2
+    train_batch_size: 1
     eval_batch_size: 1
     optimizer: 0
     scheduler: 0
@@ -35,7 +35,7 @@ trainings:
 
 optimizers: 
   - name: 'AdamW'
-    lr: 0.00001
+    lr: 0.01
   - name: 'SGD'
     lr: 0.1
     momentum: 0.9

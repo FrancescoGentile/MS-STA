@@ -236,25 +236,24 @@ class TrainingProcessor:
             y: torch.Tensor = y.long().to(self._device)
             
             # Computing logits
-            #with autocast():
-            logits = self._model(j, b)
-            loss: torch.Tensor = self._loss_func(logits, y)
-            loss.backward()
+            with autocast():
+                logits = self._model(j, b)
+                loss: torch.Tensor = self._loss_func(logits, y)
                 
             train_losses.append(loss.detach().item())
             
-            '''
             self._scaler.scale(loss).backward()
             self._scaler.unscale_(self._optimizer)
             torch.nn.utils.clip_grad_value_(self._model.parameters(), 5.0)
             self._scaler.step(self._optimizer)
             self._scaler.update()
-            '''
             
+            '''
             # Updating weights
-            #loss.backward()
-            #torch.nn.utils.clip_grad_value_(self._model.parameters(), 5.0)
+            loss.backward()
+            torch.nn.utils.clip_grad_value_(self._model.parameters(), 5.0)
             self._optimizer.step()
+            '''
             
             if lr_scheduler_after_batch:
                 self._lr_scheduler.step()
@@ -339,9 +338,6 @@ class TrainingProcessor:
                 del y
         
         end_time = timer()
-        
-        print(eval_losses)
-        exit(1)
         
         # Computing statistics
         eval_time = end_time - start_time

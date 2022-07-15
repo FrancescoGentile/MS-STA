@@ -31,7 +31,7 @@ class NTUDatasetConfig(DatasetConfig):
         self.num_coords = 3
         self.num_people = 2
         
-        self.normalize = options.generate_args.normalize
+        self.normalize = options.normalize
         if self.normalize is None:
             self.normalize = False
         

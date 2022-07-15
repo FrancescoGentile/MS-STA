@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from .tools import init_layers
 from .embedding import Embeddings
-from .msstl import MultiScaleSpatioTemporalLayer
+from .msstl2 import MultiScaleSpatioTemporalLayer
 from .mstcl import MultiScaleTemporalConvolutionLayer
 from ..dataset.skeleton import SkeletonGraph
 
@@ -146,6 +146,8 @@ class Model(nn.Module):
         _, C, T, V = input.shape
         # (N, M, C_out, T, V)
         output = input.view(N, -1, C, T, V)
-        return self.classifier(output)
+        output = self.classifier(output)
+        
+        return output
 
 from .config import ModelConfig

@@ -5,7 +5,6 @@
 import os
 from time import strftime
 import yaml
-from yaml import SafeLoader
 from munch import DefaultMunch
 from typing import List
 
@@ -58,7 +57,7 @@ class Config:
 
         try:
             with open(config_file, 'rb') as f: 
-                options = yaml.load(f, SafeLoader)
+                options = yaml.safe_load(f)
         except:
             raise(f'An error occurred while trying to read config file.')
         

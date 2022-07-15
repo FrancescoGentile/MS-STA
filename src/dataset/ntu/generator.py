@@ -2,7 +2,6 @@
 ## Code based on CTR-GCN
 ##
 
-import pickle
 from typing import List, Tuple
 import os
 import logging
@@ -11,6 +10,7 @@ from tqdm import tqdm
 
 import torch
 import torch.nn.functional as F
+import yaml
 
 from src.dataset.ntu.config import NTUDatasetConfig
 from src.dataset.generator import DatasetGenerator
@@ -35,10 +35,14 @@ class NTUDatasetGenerator(DatasetGenerator):
                 with open(self.config.ignored_file, 'r') as f:
                     ignored_samples = [f'{line.strip()}.skeleton' for line in f.readlines()]
             except Exception as e:
-                utils.log_exception(self.logger, e, self.config.debug)
+                if self.config.debug:
+                    self.logger.exception(e)
+                else:
+                    self.logger.error(e)
                 raise e
         else:
-            self.logger.warning(f'No file with ignored samples was specified.')
+            self.logger.error(f'No file with ignored samples was specified.')
+            raise ValueError(f'No file with ignored samples was specified.')
                 
         
         self.file_list = []
@@ -453,6 +457,87 @@ class NTUDatasetGenerator(DatasetGenerator):
         std_map = data.transpose((0, 2, 4, 1, 3)).reshape((N * T * M, C * V)).std(axis=0).reshape((C, 1, V, 1))
         
         return mean_map, std_map
+    
+    def _save_mean_variance(self, data: np.ndarray, phase: str):
+        N, C, T, V, M = data.shape
+        joints = np.zeros((N, C * 3, T, V, M))
+        bones = np.zeros((N, C * 3, T, V, M))
+        
+        res = {
+            'joints': { 'x': {}, 'y': {}, 'z': {} }, 
+            'bones': { 'x': {}, 'y': {}, 'z': {} } 
+        }
+        
+        # joints coordinates
+        joints[:, :C] = data
+        xj_coord_mean, yj_coord_mean, zj_coord_mean = joints[:, :C].mean(axis=(0, 2, 3, 4)).tolist()
+        xj_coord_std, yj_coord_std, zj_coord_std = joints[:, :C].std(axis=(0, 2, 3, 4)).tolist()
+        
+        res['joints']['x']['coordinate'] = { 'mean': xj_coord_mean, 'std': xj_coord_std }
+        res['joints']['y']['coordinate'] = { 'mean': yj_coord_mean, 'std': yj_coord_std }
+        res['joints']['z']['coordinate'] = { 'mean': zj_coord_mean, 'std': zj_coord_std }
+    
+        # joints velocity
+        joints[:, C:C*2, :-1] = joints[:, :C, 1:] - joints[:, :C, :-1]
+        xj_vel_mean, yj_vel_mean, zj_vel_mean = joints[:, C:C*2].mean(axis=(0, 2, 3, 4)).tolist()
+        xj_vel_std, yj_vel_std, zj_vel_std = joints[:, C:C*2].std(axis=(0, 2, 3, 4)).tolist()
+        
+        res['joints']['x']['velocity'] = { 'mean': xj_vel_mean, 'std': xj_vel_std }
+        res['joints']['y']['velocity'] = { 'mean': yj_vel_mean, 'std': yj_vel_std }
+        res['joints']['z']['velocity'] = { 'mean': zj_vel_mean, 'std': zj_vel_std }
+        
+        # joints distance to center
+        joints[:, C*2:] = joints[:, :C] - np.expand_dims(joints[:, :C, :, 1], 3)
+        xj_dis_mean, yj_dis_mean, zj_dis_mean = joints[:, C*2:].mean(axis=(0, 2, 3, 4)).tolist()
+        xj_dis_std, yj_dis_std, zj_dis_std = joints[:, C*2:].std(axis=(0, 2, 3, 4)).tolist()
+        
+        res['joints']['x']['distance'] = { 'mean': xj_dis_mean, 'std': xj_dis_std }
+        res['joints']['y']['distance'] = { 'mean': yj_dis_mean, 'std': yj_dis_std }
+        res['joints']['z']['distance'] = { 'mean': zj_dis_mean, 'std': zj_dis_std }
+        
+        # bones
+        skeleton = self.config.to_skeleton_graph()
+        conn = skeleton.joints_connections
+        for u, v in conn:
+            bones[:, :C, :, u] = joints[:, :C, :, u] - joints[:, :C, :, v]
+        
+        # bones coordinates
+        xb_coord_mean, yb_coord_mean, zb_coord_mean = bones[:, :C].mean(axis=(0, 2, 3, 4)).tolist()
+        xb_coord_std, yb_coord_std, zb_coord_std = bones[:, :C].std(axis=(0, 2, 3, 4)).tolist()
+        
+        res['bones']['x']['coordinate'] = { 'mean': xb_coord_mean, 'std': xb_coord_std }
+        res['bones']['y']['coordinate'] = { 'mean': yb_coord_mean, 'std': yb_coord_std }
+        res['bones']['z']['coordinate'] = { 'mean': zb_coord_mean, 'std': zb_coord_std }
+        
+        # bones velocity
+        bones[:, C:C*2, :-1] = bones[:, :C, 1:] - bones[:, :C, :-1]
+        xb_vel_mean, yb_vel_mean, zb_vel_mean = bones[:, C:C*2].mean(axis=(0, 2, 3, 4)).tolist()
+        xb_vel_std, yb_vel_std, zb_vel_std = bones[:, C:C*2].std(axis=(0, 2, 3, 4)).tolist()
+        
+        res['bones']['x']['velocity'] = { 'mean': xb_vel_mean, 'std': xb_vel_std }
+        res['bones']['y']['velocity'] = { 'mean': yb_vel_mean, 'std': yb_vel_std }
+        res['bones']['z']['velocity'] = { 'mean': zb_vel_mean, 'std': zb_vel_std }
+        
+        # bones angle
+        bone_length = 0
+        for c in range(C):
+            bone_length += bones[:, c] ** 2
+        bone_length = np.sqrt(bone_length) + 0.0001
+        for c in range(C):
+            bones[:, C*2+c] = np.arccos(bones[:, c] / bone_length)
+        
+        xb_ang_mean, yb_ang_mean, zb_ang_mean = bones[:, C*2:].mean(axis=(0, 2, 3, 4)).tolist()
+        xb_ang_std, yb_ang_std, zb_ang_std = bones[:, C*2:].std(axis=(0, 2, 3, 4)).tolist()
+        
+        res['bones']['x']['angle'] = { 'mean': xb_ang_mean, 'std': xb_ang_std }
+        res['bones']['y']['angle'] = { 'mean': yb_ang_mean, 'std': yb_ang_std }
+        res['bones']['z']['angle'] = { 'mean': zb_ang_mean, 'std': zb_ang_std }
+        
+        # save results
+        file = os.path.join(self.config.dataset_path, f'{phase}_mean_std.yaml')
+        self.logger.info(f'Saving mean and std of data in {file}')
+        with open(file, 'w') as f:
+            yaml.dump(res, f)
                             
     def _gendata(self, files: List[Tuple[str, str]], phase: str): 
         data = []
@@ -468,14 +553,6 @@ class NTUDatasetGenerator(DatasetGenerator):
         
         # Save joints
         data = np.array(data)
-        
-        if self.config.normalize:
-            mean = data.mean(axis=(0, 2, 3, 4))
-            mean = mean[None, :, None, None, None]
-            std = data.std(axis=(0, 2, 3, 4))
-            std = std[None, :, None, None, None]
-            data = (data - mean) / std
-        
         data_file = os.path.join(self.config.dataset_path, f'{phase}_data.npy')
         self.logger.info(f'Saving skeletons data in {data_file}')
         np.save(data_file, data)
@@ -485,6 +562,9 @@ class NTUDatasetGenerator(DatasetGenerator):
         labels_file = os.path.join(self.config.dataset_path, f'{phase}_labels.npy')
         self.logger.info(f'Saving labels data in {labels_file}')
         np.save(labels_file, labels)
+        
+        # Save mean and std
+        self._save_mean_variance(data, phase)
     
     def _get_train_test_split(self) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
         train = []
@@ -524,6 +604,10 @@ class NTUDatasetGenerator(DatasetGenerator):
             
     def start(self):
         train_files, test_files = self._get_train_test_split()
+        
+        if self.config.debug:
+            train_files = train_files[:300]
+            test_files = test_files[:300]
         
         self.logger.info(f'Generating training data of {self.config.name} dataset')
         self._gendata(train_files, 'train')

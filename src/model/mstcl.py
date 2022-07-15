@@ -97,8 +97,8 @@ class MultiScaleTemporalConvolutionLayer(nn.Module):
         self.branches.append(nn.Sequential(
             nn.MaxPool2d(kernel_size=(3, 1), stride=(stride, 1), padding=(1, 0)),
             nn.Conv2d(in_channels, branch_channels, kernel_size=1, padding=0, bias=False),
-            nn.BatchNorm2d(branch_channels),
             activation,
+            nn.BatchNorm2d(branch_channels),
         ))
         
         # Squeeze and Excitation network
@@ -109,8 +109,9 @@ class MultiScaleTemporalConvolutionLayer(nn.Module):
             nn.Sigmoid()
         )
         
-        # Residual connections
+        self.norm = nn.BatchNorm2d(out_channels)
         
+        # Residual connection
         if not residual: 
             self.residual = lambda _: 0
         elif (in_channels == out_channels) and (stride == 1):
@@ -144,5 +145,7 @@ class MultiScaleTemporalConvolutionLayer(nn.Module):
         # (N, C_out, T, V)
         output = intermediate * s
         output += self.residual(input)
+        
+        output = self.norm(output)
         
         return output
